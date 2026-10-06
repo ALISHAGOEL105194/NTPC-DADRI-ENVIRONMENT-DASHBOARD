@@ -303,7 +303,6 @@ body{background:var(--bg);color:var(--t);font-family:var(--sans);font-size:14px;
   <button class="tab" data-tab="load" onclick="sw('load',this)">Unit Load</button>
   <button class="tab" data-tab="alerts" onclick="sw('alerts',this)">🔴 Alerts</button>
   <button class="tab" data-tab="trend" onclick="sw('trend',this)">15-min Trend</button>
-  <button class="tab" data-tab="tags" onclick="sw('tags',this)">PI Tags</button>
   <button class="tab" data-tab="monthly" onclick="sw('monthly',this)">📅 Monthly</button>
   <button class="tab" data-tab="water" onclick="sw('water',this)">💧 Water</button>
   <button class="tab" data-tab="yearly" onclick="sw('yearly',this)">📆 Yearly</button>
@@ -625,15 +624,6 @@ body{background:var(--bg);color:var(--t);font-family:var(--sans);font-size:14px;
     <div style="position:relative;height:280px"><canvas id="trendC"></canvas></div>
   </div>
   <div class="cc"><div class="ct" style="margin-bottom:10px" id="trend-stat-ttl">Unit 1 — Statistics</div><table class="tbl" id="trendStats"></table></div>
-</div>
-
-<!-- TAGS -->
-<div id="tab-tags" class="panel">
-  <div class="cc">
-    <div class="secttitle">All PI Tags — NTPC Dadri (6 Units)</div>
-    <table class="tagtbl"><thead><tr><th>Param</th><th>Unit</th><th>Stage</th><th>PI Tag</th><th>Limit</th><th>Status</th></tr></thead>
-    <tbody id="tagTb"></tbody></table>
-  </div>
 </div>
 
 <!-- MONTHLY ANALYSIS -->
@@ -2867,11 +2857,12 @@ const dates=Object.values(byDate)
     const rows=rowsByDate[d.dateStr]||[];
     const buildParam=(paramCol,lim,u)=>{
       const loadCol=2+u*5;
-      let naOn=0, naOff=0;
+      let naOn=0, naOff=0, onTotal=0;
       const validVals=[];
       rows.forEach(row=>{
         const pv=getVal(row,paramCol);
         const lv=getVal(row,loadCol);
+                     if(lv!==null && lv>10) onTotal++;
         if(pv===null){
           // Data not available — determine if unit was running
           if(lv!==null && lv>10){
@@ -2889,7 +2880,7 @@ const dates=Object.values(byDate)
         exc    : validVals.filter(v=>v>=lim).length,
         total  : rows.length,
         naOn,
-        naOff
+        naOff, onTotal
       };
     };
     return{
@@ -2924,7 +2915,7 @@ const dates=Object.values(byDate)
       const totNaOn=dayWise.reduce((s,d)=>s+(d[key][u].naOn||0),0);
       const totNaOff=dayWise.reduce((s,d)=>s+(d[key][u].naOff||0),0);
       const avgs=dayWise.map(d=>d[key][u].avg).filter(v=>v!==null);
-      return{avg:vavg(avgs),exc:totExc,total:totBlocks,naOn:totNaOn,naOff:totNaOff};
+           return{avg:vavg(avgs),exc:totExc,total:totBlocks,naOn:totNaOn,naOff:totNaOff,onTotal:dayWise.reduce((s,d)=>s+(d[key][u].onTotal||0),0)};
     };
     monthSummary.sox.push(sumParam('sox'));
     monthSummary.pm.push(sumParam('pm'));
@@ -3825,6 +3816,74 @@ window.addEventListener('load', () => {
   });
   setInterval(() => ['monthly', 'yearly', 'water'].forEach(k => gsFetch(k, false)), 60*60*1000);
 });
+// ══════════════════════════════════════════════════════════════
+// DATA AVAILABILITY (unit-wise, Unit ON / Unit OFF) — Monthly & Yearly tabs
+// PASTE at the very end of the last script block (after the Google Sheets patch).
+// Also needs the 4 small edits in processMonthlyData (see chat).
+// ══════════════════════════════════════════════════════════════
+
+// Add up the counts for one unit/parameter over days (monthly) or months (yearly)
+function availTot(arr, p, u){
+  const sum = k => arr.reduce((s, d) => s + (d[p][u][k] || 0), 0);
+  return {
+    total : sum('total'), naOn: sum('naOn'), naOff: sum('naOff'),
+    onTotal: arr.some(d => d[p][u].onTotal === undefined) ? undefined : sum('onTotal')
+  };
+}
+
+function availTable(id, title, get){
+  const card = document.getElementById(id) && document.getElementById(id).closest('.cc');
+  if(!card) return;
+  const two = card.parentNode;                       // the .two grid holding the stats card
+  let box = document.getElementById(id + '-avail');
+  if(!box){
+    box = document.createElement('div');
+    box.id = id + '-avail'; box.className = 'cc';
+    two.parentNode.insertBefore(box, two.nextSibling);
+  }
+  const pc  = (a, b) => b > 0 ? a / b * 100 : null;
+  const col = v => v === null ? '#8a94a6' : v >= 95 ? '#2e9e5b' : v >= 80 ? '#c07c0a' : '#d63031';
+  const cell = (v, a, b) => v === null
+    ? '<td style="color:#8a94a6">—</td>'
+    : `<td><span style="color:${col(v)};font-weight:600">${v.toFixed(1)}%</span><br/><span style="color:#8a94a6;font-size:9px">${a} / ${b}</span></td>`;
+  const plain = v => v === null ? '<td style="color:#8a94a6">—</td>' : `<td>${v.toFixed(1)}%</td>`;
+
+  const rows = [0,1,2,3,4,5].map(u => {
+    const x = get(u);
+    if(!x || !x.total || x.onTotal === undefined)
+      return `<tr><td style="color:${UC[u]}">U${u+1}</td><td colspan="5" style="color:#8a94a6;text-align:center;font-style:italic">— refetch the sheet to calculate</td></tr>`;
+    const onV = x.onTotal - x.naOn,            // valid readings while unit ON
+          offT = x.total - x.onTotal,          // blocks while unit OFF
+          offV = offT - x.naOff,               // valid readings while unit OFF
+          allV = x.total - x.naOn - x.naOff;   // all valid readings
+    return `<tr><td style="color:${UC[u]}">U${u+1}</td>
+      ${cell(pc(allV, x.total), allV, x.total)}
+      ${cell(pc(onV, x.onTotal), onV, x.onTotal)}
+      ${cell(pc(offV, offT), offV, offT)}
+      ${plain(pc(x.onTotal, x.total))}
+      ${plain(pc(offT, x.total))}</tr>`;
+  }).join('');
+
+  box.innerHTML = `<div class="ct" style="margin-bottom:4px">📶 ${title}</div>
+    <div class="cs" style="margin-bottom:10px">Availability = valid readings ÷ blocks · Unit ON = load above 10 MW · Green ≥95% · Amber ≥80% · Red &lt;80%</div>
+    <div style="overflow-x:auto"><table class="tbl">
+      <tr><th>Unit</th><th>Overall availability</th><th>Availability<br/>(Unit ON)</th><th>Availability<br/>(Unit OFF)</th><th>Time Unit ON</th><th>Time Unit OFF</th></tr>
+      ${rows}</table></div>`;
+}
+
+// Hook into the existing renderers (no need to edit them)
+(function(){
+  const rm = renderMonthly, ry = renderYearly;
+  renderMonthly = function(){
+    rm();
+    if(M) availTable('monthlyStatTbl', 'Data Availability — ' + monthlyParam.toUpperCase(), u => availTot(M.dayWise, monthlyParam, u));
+  };
+  renderYearly = function(){
+    ry();
+    const fy = loadYearlyData();
+    if(fy.months.length) availTable('yearlyStatTbl', 'Data Availability — ' + yearlyParam.toUpperCase(), u => availTot(fy.months, yearlyParam, u));
+  };
+})();
 </script>
 </body>
 </html>
